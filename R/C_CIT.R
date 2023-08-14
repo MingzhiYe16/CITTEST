@@ -25,8 +25,6 @@
 ##### Function to compute F test given continuous outcome and full vs reduced sets of covariates
 
 
-
-
 linreg = function( nms.full, nms.redu=NULL, nm.y, mydat ){
     
     mydat = na.exclude( mydat )
