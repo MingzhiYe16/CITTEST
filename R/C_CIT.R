@@ -23,6 +23,225 @@
 
 # If trios == NULL, then L is matrix of instrumental variables to be simultaneously included in the model, o.w. L is matrix where a single variable will be indicated by each row of trios.
 ##### Function to compute F test given continuous outcome and full vs reduced sets of covariates
+cit.bp.m.v2.2 = function( L, G, T, C=NULL, maxit=10000, n.perm=0, rseed=NULL, v2=TRUE ) {
+  
+  permit=1000
+  
+  if( !is.null(perm.index) ){ 
+    n.perm = ncol(perm.index)
+    perm.index = as.matrix( perm.index )
+  }
+  
+  if(is.vector(L)) {
+    L = matrix(L,ncol=1)
+  } else {
+    L = as.matrix(L)
+  }
+  if(is.vector(G)) {
+    G = matrix(G,ncol=1)
+  } else {
+    G = as.matrix(G)
+  }
+  if(is.vector(T)) {
+    T = matrix(T,ncol=1)
+  } else {
+    T = as.matrix(T)
+  }
+  if( !is.null(C) ){
+    if(is.vector(C)) {
+      C = matrix(C,ncol=1)
+    } else {
+      C = as.matrix(C)
+    }
+  }
+  
+  aa = nrow(L) == nrow(T)
+  if( !aa ) stop( "Error: rows of L must equal rows of T." )
+  aa = nrow(G) == nrow(T)
+  if( !aa ) stop( "Error: rows of G must equal rows of T." )
+  if( !is.null(C) ){
+    aa = nrow(C) == nrow(T)
+    if( !aa ) stop( "Error: rows of C must equal rows of T." )
+  }
+  
+  # Recode NA's to -9999
+  ms_f = function(mat) {
+    for(c_ in 1:ncol(mat)){
+      mat[is.na(mat[,c_]),c_] = -9999
+    }
+    return(mat);
+  }
+  L = ms_f(L)
+  G = ms_f(G)
+  T = ms_f(T)
+  if( !is.null(C) ) C = ms_f(C)
+  
+  colnames(T) = "T"
+  colnames(G) = paste("G", 1:ncol(G), sep="")
+  colnames(L) = paste("L", 1:ncol(L), sep="")
+  if(!is.null(C)) colnames(C) = paste("C", 1:ncol(C), sep="")
+  
+  # Remove missing
+  tmp = na.exclude(cbind(T, L, G, C))
+  if(is.null(C)){
+    names(tmp) = c("T", colnames(L), colnames(G))
+  } else {
+    names(tmp) = c("T", colnames(L), colnames(G))
+  }
+  T = as.matrix(tmp[, "T"])
+  L = as.matrix(tmp[, colnames(L)])
+  G = as.matrix(tmp[, colnames(G)])
+  if( !is.null(C) ) C = as.matrix(tmp[, colnames(C)])
+  rm(tmp)
+  
+  df.C = 0
+  if( !is.null(C) ) df.C = ncol(C)
+  nobs = dim(T)[1]
+  df.L = dim(L)[2]
+  df.G = dim(G)[2]
+  pval = pval1 = pval2 = pval3 = pval4 = pval3nc = 1 # output component p-values
+  
+  # if( n.resampl < n.perm ) n.resampl = n.perm
+  if( !is.null(C) ){
+    mydat = as.data.frame(cbind( L, G, T, C ))
+  } else mydat = as.data.frame(cbind( L, G, T ))
+  for( i in 1:ncol(mydat) ) mydat[, i ] = as.numeric( mydat[, i ]  )
+  L.nms = paste("L", 1:ncol(L), sep="") 
+  G.nms = paste("G", 1:ncol(G), sep="")
+  C.nms=NULL
+  if( !is.null(C) ) C.nms = paste("C", 1:ncol(C), sep="") 
+  names(mydat) = c( L.nms, G.nms,"T", C.nms )
+  
+  if( n.perm == 0 ){
+    if( is.null(C) ){
+      tmp = .C("citbinm", as.double(L), as.double(G), as.double(T), as.integer(maxit), as.integer(nobs), as.integer(df.L), as.integer(df.G),
+               as.double(pval1), as.double(pval2), as.double(pval4), as.double(pval3nc));
+      names(tmp) = c("L", "G", "T", "maxit", "nobs", "df.G", "df.L", "pval1", "pval2", "pval4", "pval3nc")
+      
+      # using pval3nc and df, n.col, compute non-centrality parameter, lambda
+      # transform pval3nc p-value to F-statistic w/ correct df, df.numerator = df.L, df.denominator = nobs - (df.L + df.T + 1), where df.T = 1
+      df1 = df.L
+      df2 = nobs - (df.L + 2) # 2 is for df.T and intercept, covariates are not included in pval3 test
+      G.nc = qf(tmp["pval3nc"][[1]], df1=df1, df2=df2, lower.tail = FALSE)
+      fncp = G.nc * (df1/df2) * (df2-df1) - df1
+      if(fncp < 0 | !v2) fncp = 0
+      
+      # p-value, p3: G ~ L|T
+      p3 = linregM.nc( mydat[, L.nms], mydat[, G.nms], mydat[, "T"], fncp )
+      tmp["pval3"] = p3
+      
+    } else {
+      tmp = .C("citbinmcvr", as.double(L), as.double(G), as.double(T), as.double(C), 
+               as.integer(maxit), as.integer(nobs), as.integer(df.L), as.integer(df.G), as.integer(df.C),
+               as.double(pval1), as.double(pval2), as.double(pval4), as.double(pval3nc));
+      names(tmp) = c("L", "G", "T", "C", "maxit", "nobs", "df.L", "df.G", "df.C", 
+                     "pval1", "pval2", "pval4", "pval3nc")
+      
+      # using pval3nc and df's, compute non-centrality parameter, lambda
+      # transform pval3nc p-value to F-statistic w/ correct df, df.numerator = df.L, df.denominator = nobs - (df.L + df.T + 1), where df.T = 1
+      df1 = df.L
+      df2 = nobs - (df.L + 2) # 2 is for df.T and intercept, covariates are not included in pval3 test
+      G.nc = qf(tmp["pval3nc"][[1]], df1=df1, df2=df2, lower.tail = FALSE)
+      fncp = G.nc * (df1/df2) * (df2-df1) - df1
+      if(fncp < 0 | !v2) fncp = 0
+      
+      # p-value, p3: G ~ L|T
+      p3 = linregM.nc( mydat[, L.nms], mydat[, G.nms], mydat[, "T"], fncp )
+      tmp["pval3"] = p3
+      
+    } # End else is null C
+    
+    ntest = 1
+    rslts = as.data.frame(matrix(NA,nrow=ntest,ncol=5))
+    names(rslts) = c("p_cit", "p_TassocL", "p_TassocGgvnL", "p_GassocLgvnT", "p_LindTgvnG")
+    rslts[1, "p_TassocL"] = tmp["pval1"][[1]]
+    rslts[1, "p_TassocGgvnL"] = tmp["pval2"][[1]]
+    rslts[1, "p_GassocLgvnT"] = tmp["pval3"][[1]]
+    rslts[1, "p_LindTgvnG"] = tmp["pval4"][[1]]
+    rslts[1, "p_cit"] = max(rslts[1, c("p_TassocL", "p_TassocGgvnL", "p_GassocLgvnT", "p_LindTgvnG")])
+    
+  } # End if n.perm == 0
+  
+  if( n.perm > 0 ){ 
+    pval = pval1 = pval2 = pval3 = pval4 = pval3nc = rep( 1, (n.perm+1) ) # output component p-values
+    if(is.null(rseed)) rseed = ceiling(runif(1)*10000000)
+    set.seed( rseed )
+    
+    if( is.null(C) ) {
+      tmp = .C("citbinmp", as.double(L), as.double(G), as.double(T),
+               as.integer(maxit), as.integer(permit), as.integer(n.perm), as.integer(nobs), as.integer(df.L), as.integer(df.G),
+               as.double(pval1), as.double(pval2), as.double(pval4), as.double(pval3nc));
+      names(tmp) = c("L", "G", "T", "maxit", "permit", "n.perm", "nobs", "df.L", "df.G",
+                     "pval1", "pval2", "pval4", "pval3nc")
+      
+      # using pval3nc and df's, compute non-centrality parameter, lambda
+      # transform pval3nc p-value to F-statistic w/ correct df, df.numerator = df.L, df.denominator = nobs - (df.L + df.T + 1), where df.T = 1
+      df1 = df.L
+      df2 = nobs - (df.L + 2) # 2 is for df.T and intercept, covariates are not included in pval3 test
+      G.nc = qf(tmp["pval3nc"][[1]], df1=df1, df2=df2, lower.tail = FALSE)
+      fncp = G.nc * (df1/df2) * (df2-df1) - df1
+      for(j in 1:length(fncp)){
+        if(fncp[j] < 0 | !v2) fncp[j] = 0
+      }
+      
+      # p-value, p3: G ~ L|T
+      p3 = rep(1, length(fncp))
+      for(j in 1:length(fncp)){
+        ind.perm = 1:nrow(mydat)
+        if(j > 1) ind.perm = sample(1:nrow(mydat))
+        tmpdat = mydat
+        tmpdat[, L.nms] = mydat[ind.perm, L.nms]
+        p3[j] = linregM.nc( tmpdat[, L.nms], tmpdat[, G.nms], tmpdat[, "T"], fncp[j] )
+        rm(tmpdat)
+      } 
+      tmp["pval3"][[1]] = p3
+      
+    } else {
+      tmp = .C("citbinmpcvr", as.double(L), as.double(G), as.double(T), as.double(C),
+               as.integer(maxit), as.integer(permit), as.integer(n.perm), as.integer(nobs), as.integer(df.L), as.integer(df.G), as.integer(df.C),
+               as.double(pval1), as.double(pval2), as.double(pval4), as.double(pval3nc));
+      names(tmp) = c("L", "G", "T", "C", "maxit", "permit", "n.perm", "nobs", "df.L", "df.G", "df.C",
+                     "pval1", "pval2", "pval4", "pval3nc")
+      
+      # using pval3nc and df, n.col, compute non-centrality parameter, lambda
+      # transform pval3nc p-value to F-statistic w/ correct df, df.numerator = df.L, df.denominator = nobs - (df.L + df.T + 1), where df.T = 1
+      df1 = df.L
+      df2 = nobs - (df.L + 2) # 2 is for G and intercept
+      G.nc = qf(tmp["pval3nc"][[1]], df1=df1, df2=df2, lower.tail = FALSE)
+      fncp = G.nc * (df1/df2) * (df2-df1) - df1
+      for(j in 1:length(fncp)){
+        if(fncp[j] < 0 | !v2) fncp[j] = 0
+      }
+      
+      # p-value, p3: G ~ L|T
+      p3 = rep(1, length(fncp))
+      for(j in 1:length(fncp)){
+        ind.perm = 1:nrow(mydat)
+        if(j > 1) ind.perm = sample(1:nrow(mydat))
+        tmpdat = mydat
+        tmpdat[, L.nms] = mydat[ind.perm, L.nms]
+        p3[j] = linregM.nc( tmpdat[, L.nms], tmpdat[, G.nms], tmpdat[, "T"], fncp[j] )
+        rm(tmpdat)
+      } 
+      tmp["pval3"][[1]] = p3
+      
+    } # End else is null covar and perm.imat
+    
+    rslts = as.data.frame(matrix(NA,nrow=(n.perm+1),ncol=6))
+    names(rslts) = c("perm", "p_cit", "p_TassocL", "p_TassocGgvnL", "p_GassocLgvnT", "p_LindTgvnG")
+    for(perm in 0:n.perm){
+      rslts[perm+1, "perm"] = perm
+      rslts[perm+1, "p_cit"] = max(c(tmp["pval1"][[1]][perm+1], tmp["pval2"][[1]][perm+1], tmp["pval3"][[1]][perm+1], tmp["pval4"][[1]][perm+1]))
+      rslts[perm+1, "p_TassocL"] = tmp["pval1"][[1]][perm+1]
+      rslts[perm+1, "p_TassocGgvnL"] = tmp["pval2"][[1]][perm+1]
+      rslts[perm+1, "p_GassocLgvnT"] = tmp["pval3"][[1]][perm+1]
+      rslts[perm+1, "p_LindTgvnG"] = tmp["pval4"][[1]][perm+1]
+    }
+  } # End if perm > 0
+  
+  return(rslts)
+  
+} # End cit.bp.m.v2 function
 
 
 linreg12 = function( nms.full, nms.redu=NULL, nm.y, mydat ){
